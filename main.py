@@ -1,88 +1,76 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 import os
-import logging
 import sys
-import json
 import time
-from typing import Optional, Dict, Any, List
-from kubernetes import client, config, watch
+import json
+import logging
+from typing import Dict, List, Optional
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from kubernetes import client, config, watch
 
-# Configure structured logging
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
+# Cloudflare API base URL
+CF_API_BASE = "https://api.cloudflare.com/client/v4"
+
 # Predefined geo-location coordinates
 GEO_LOCATIONS = {
-    "eu": {"latitude": 50.1109, "longitude": 8.6821, "name": "Europe"},
-    "us": {"latitude": 37.7749, "longitude": -122.4194, "name": "United States"},
-    "asia": {"latitude": 35.6762, "longitude": 139.6503, "name": "Asia"}
+    "eu": {"name": "Europe", "latitude": 50.1109, "longitude": 8.6821},
+    "us": {"name": "United States", "latitude": 37.7749, "longitude": -122.4194},
+    "asia": {"name": "Asia", "latitude": 35.6762, "longitude": 139.6503}
 }
 
-# Environment variable validation
 def validate_env_vars() -> Dict[str, str]:
-    """Validate required environment variables."""
-    required_vars = {
-        'CF_API_TOKEN': os.getenv("CF_API_TOKEN"),
-        'CF_ACCOUNT_ID': os.getenv("CF_ACCOUNT_ID"),
-        'CF_ZONE_ID': os.getenv("CF_ZONE_ID"),
-        'GEO_LOCATION': os.getenv("GEO_LOCATION"),
-    }
+    """Validate and return required environment variables."""
+    required_vars = ['CF_API_TOKEN', 'CF_ACCOUNT_ID', 'CF_ZONE_ID', 'GEO_LOCATION']
+    missing_vars = []
     
-    missing_vars = [var for var, value in required_vars.items() if not value]
+    config = {}
+    for var in required_vars:
+        value = os.getenv(var)
+        if not value:
+            missing_vars.append(var)
+        else:
+            config[var] = value
+    
     if missing_vars:
         logger.error(f"Missing required environment variables: {missing_vars}")
         sys.exit(1)
     
     # Validate GEO_LOCATION
-    geo_location = required_vars['GEO_LOCATION']
-    if geo_location not in GEO_LOCATIONS:
-        logger.error(f"Invalid GEO_LOCATION '{geo_location}'. Must be one of: {list(GEO_LOCATIONS.keys())}")
+    if config['GEO_LOCATION'] not in GEO_LOCATIONS:
+        logger.error(f"Invalid GEO_LOCATION '{config['GEO_LOCATION']}'. Must be one of: {list(GEO_LOCATIONS.keys())}")
         sys.exit(1)
     
-    # Validate optional numeric values
+    # Set optional variables with defaults
+    config['CF_LB_HOSTNAME'] = os.getenv('CF_LB_HOSTNAME', 'app.example.com')
+    config['CF_ORIGIN_WEIGHT'] = float(os.getenv('CF_ORIGIN_WEIGHT', '33'))
+    config['LABEL_SELECTOR'] = os.getenv('LABEL_SELECTOR', 'dns.external/geo-route=true')
+    
+    # Validate CF_ORIGIN_WEIGHT
     try:
-        origin_weight = int(os.getenv("CF_ORIGIN_WEIGHT", "33"))
-        if origin_weight < 1 or origin_weight > 100:
-            raise ValueError("CF_ORIGIN_WEIGHT must be between 1 and 100")
+        weight = config['CF_ORIGIN_WEIGHT']
+        if weight < 0 or weight > 100:
+            raise ValueError("Weight must be between 0 and 100")
     except ValueError as e:
         logger.error(f"Invalid CF_ORIGIN_WEIGHT value: {e}")
         sys.exit(1)
     
-    return {
-        'CF_API_TOKEN': required_vars['CF_API_TOKEN'],
-        'CF_ACCOUNT_ID': required_vars['CF_ACCOUNT_ID'],
-        'CF_ZONE_ID': required_vars['CF_ZONE_ID'],
-        'GEO_LOCATION': geo_location,
-        'CF_LB_HOSTNAME': os.getenv("CF_LB_HOSTNAME", "app.example.com"),
-        'CF_ORIGIN_WEIGHT': origin_weight,
-        'LABEL_SELECTOR': os.getenv("LABEL_SELECTOR", "dns.external/geo-route=true"),
-    }
+    return config
 
-# Global configuration
+# Load configuration
 try:
     CONFIG = validate_env_vars()
-    CF_API_BASE = "https://api.cloudflare.com/client/v4"
-    
-    # Create session with retry strategy
-    session = requests.Session()
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    
-    headers = {
-        "Authorization": f"Bearer {CONFIG['CF_API_TOKEN']}",
-        "Content-Type": "application/json"
-    }
+    logger.info(f"Configuration loaded successfully")
+    logger.info(f"Geo-location: {CONFIG['GEO_LOCATION']} ({GEO_LOCATIONS[CONFIG['GEO_LOCATION']]['name']})")
+    logger.info(f"Load balancer hostname: {CONFIG['CF_LB_HOSTNAME']}")
+    logger.info(f"Supported geo-locations: {list(GEO_LOCATIONS.keys())}")
     
 except Exception as e:
     logger.error(f"Failed to initialize configuration: {e}")
@@ -129,19 +117,40 @@ def build_pool_name(cluster_name: str) -> str:
 def make_cloudflare_request(method: str, url: str, data: Dict = None) -> Optional[Dict]:
     """Make a Cloudflare API request with proper error handling."""
     try:
+        headers = {
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Bearer {CONFIG['CF_API_TOKEN']}"
+        }
+        
+        # Log the request details
+        logger.info(f"Making {method.upper()} request to: {url}")
+        if data:
+            logger.info(f"Request data: {data}")
+        
+        # Prepare JSON data with explicit UTF-8 encoding
+        json_data = None
+        if data:
+            json_data = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        
         if method.upper() == "GET":
-            response = session.get(url, headers=headers, timeout=30)
+            response = requests.get(url, headers=headers, timeout=30)
         elif method.upper() == "POST":
-            response = session.post(url, headers=headers, json=data, timeout=30)
+            response = requests.post(url, headers=headers, data=json_data, timeout=30)
         elif method.upper() == "PUT":
-            response = session.put(url, headers=headers, json=data, timeout=30)
+            response = requests.put(url, headers=headers, data=json_data, timeout=30)
         elif method.upper() == "DELETE":
-            response = session.delete(url, headers=headers, timeout=30)
+            response = requests.delete(url, headers=headers, timeout=30)
         else:
             logger.error(f"Unsupported HTTP method: {method}")
             return None
         
+        # Log the response details
+        logger.info(f"Response status: {response.status_code}")
+        logger.info(f"Response headers: {dict(response.headers)}")
+        logger.info(f"Response body: {response.text}")
+        
         if response.status_code in [200, 201]:
+            logger.info(f"Cloudflare API request successful: {response.status_code}")
             return response.json()
         else:
             logger.error(f"Cloudflare API request failed: {response.status_code} - {response.text}")
@@ -150,27 +159,44 @@ def make_cloudflare_request(method: str, url: str, data: Dict = None) -> Optiona
     except requests.exceptions.RequestException as e:
         logger.error(f"Request failed: {e}")
         return None
+    except Exception as e:
+        logger.error(f"Unexpected error in request: {e}")
+        return None
 
 def find_pool_id_by_name(name: str) -> Optional[str]:
     """Find pool ID by name."""
+    logger.info(f"Searching for pool with name: {name}")
     url = f"{CF_API_BASE}/accounts/{CONFIG['CF_ACCOUNT_ID']}/load_balancers/pools"
     result = make_cloudflare_request("GET", url)
     
     if result and result.get('success'):
         pools = result.get('result', [])
+        logger.info(f"Found {len(pools)} pools in account")
         for pool in pools:
+            logger.info(f"Pool: {pool['name']} (ID: {pool['id']})")
             if pool['name'] == name:
+                logger.info(f"Found matching pool: {name} with ID: {pool['id']}")
                 return pool['id']
+        logger.info(f"No pool found with name: {name}")
+    else:
+        logger.error(f"Failed to retrieve pools from Cloudflare API")
     
     return None
 
 def get_pool_origins(pool_id: str) -> List[Dict]:
     """Get current origins from a pool."""
+    logger.info(f"Retrieving origins for pool ID: {pool_id}")
     url = f"{CF_API_BASE}/accounts/{CONFIG['CF_ACCOUNT_ID']}/load_balancers/pools/{pool_id}"
     result = make_cloudflare_request("GET", url)
     
     if result and result.get('success'):
-        return result['result'].get('origins', [])
+        origins = result['result'].get('origins', [])
+        logger.info(f"Found {len(origins)} origins in pool {pool_id}")
+        for origin in origins:
+            logger.info(f"Origin: {origin.get('name', 'unnamed')} - {origin.get('address', 'no-address')} (enabled: {origin.get('enabled', False)})")
+        return origins
+    else:
+        logger.error(f"Failed to retrieve origins for pool {pool_id}")
     
     return []
 
@@ -178,14 +204,18 @@ def create_or_update_pool_with_coordination(ip_address: str, cluster_name: str) 
     """Create or update pool with multi-cluster coordination."""
     try:
         pool_name = build_pool_name(cluster_name)
+        logger.info(f"Processing pool operation for cluster: {cluster_name}, pool: {pool_name}, IP: {ip_address}")
+        
         pool_id = find_pool_id_by_name(pool_name)
         
         # Get coordinates for the geo-location
         location_data = GEO_LOCATIONS[CONFIG['GEO_LOCATION']]
         latitude = location_data["latitude"]
         longitude = location_data["longitude"]
+        logger.info(f"Using coordinates: lat={latitude}, lng={longitude} for geo-location: {CONFIG['GEO_LOCATION']}")
         
         if pool_id:
+            logger.info(f"Pool {pool_name} exists (ID: {pool_id}), checking for IP {ip_address}")
             # Get existing origins and merge with new IP
             existing_origins = get_pool_origins(pool_id)
             
@@ -224,8 +254,10 @@ def create_or_update_pool_with_coordination(ip_address: str, cluster_name: str) 
                 return pool_id
             else:
                 logger.error(f"Failed to update pool {pool_name}")
+                logger.error(f"Result: {result}")
                 return None
         else:
+            logger.info(f"Pool {pool_name} does not exist, creating new pool")
             # Create new pool
             origins = [{
                 "name": f"origin-{CONFIG['GEO_LOCATION']}",
@@ -248,10 +280,11 @@ def create_or_update_pool_with_coordination(ip_address: str, cluster_name: str) 
             
             if result and result.get('success'):
                 new_pool_id = result['result']['id']
-                logger.info(f"Successfully created pool {pool_name} with IP {ip_address}")
+                logger.info(f"Successfully created pool {pool_name} with IP {ip_address} (ID: {new_pool_id})")
                 return new_pool_id
             else:
                 logger.error(f"Failed to create pool {pool_name}")
+                logger.error(f"Result: {result}")
                 return None
                 
     except Exception as e:
@@ -260,20 +293,29 @@ def create_or_update_pool_with_coordination(ip_address: str, cluster_name: str) 
 
 def find_lb_id_by_name(name: str) -> Optional[str]:
     """Find load balancer ID by hostname."""
+    logger.info(f"Searching for load balancer with name: {name}")
     url = f"{CF_API_BASE}/zones/{CONFIG['CF_ZONE_ID']}/load_balancers"
     result = make_cloudflare_request("GET", url)
     
     if result and result.get('success'):
         lbs = result.get('result', [])
+        logger.info(f"Found {len(lbs)} load balancers in zone")
         for lb in lbs:
+            logger.info(f"Load Balancer: {lb['name']} (ID: {lb['id']})")
             if lb['name'] == name:
+                logger.info(f"Found matching load balancer: {name} with ID: {lb['id']}")
                 return lb['id']
+        logger.info(f"No load balancer found with name: {name}")
+    else:
+        logger.error(f"Failed to retrieve load balancers from Cloudflare API")
     
     return None
 
 def create_or_update_load_balancer(pool_id: str) -> bool:
     """Create or update load balancer."""
     try:
+        logger.info(f"Processing load balancer operation for hostname: {CONFIG['CF_LB_HOSTNAME']}, pool ID: {pool_id}")
+        
         lb_id = find_lb_id_by_name(CONFIG['CF_LB_HOSTNAME'])
         
         lb_data = {
@@ -285,7 +327,10 @@ def create_or_update_load_balancer(pool_id: str) -> bool:
             "steering_policy": "least_connections"
         }
         
+        logger.info(f"Load balancer configuration: {lb_data}")
+        
         if lb_id:
+            logger.info(f"Load balancer {CONFIG['CF_LB_HOSTNAME']} exists (ID: {lb_id}), updating...")
             # Update existing load balancer
             url = f"{CF_API_BASE}/zones/{CONFIG['CF_ZONE_ID']}/load_balancers/{lb_id}"
             result = make_cloudflare_request("PUT", url, lb_data)
@@ -297,6 +342,7 @@ def create_or_update_load_balancer(pool_id: str) -> bool:
                 logger.error(f"Failed to update load balancer {CONFIG['CF_LB_HOSTNAME']}")
                 return False
         else:
+            logger.info(f"Load balancer {CONFIG['CF_LB_HOSTNAME']} does not exist, creating new load balancer...")
             # Create new load balancer
             url = f"{CF_API_BASE}/zones/{CONFIG['CF_ZONE_ID']}/load_balancers"
             result = make_cloudflare_request("POST", url, lb_data)

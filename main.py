@@ -30,11 +30,18 @@ def validate_env_vars() -> Dict[str, str]:
         'CF_API_TOKEN': os.getenv("CF_API_TOKEN"),
         'CF_ACCOUNT_ID': os.getenv("CF_ACCOUNT_ID"),
         'CF_ZONE_ID': os.getenv("CF_ZONE_ID"),
+        'GEO_LOCATION': os.getenv("GEO_LOCATION"),
     }
     
     missing_vars = [var for var, value in required_vars.items() if not value]
     if missing_vars:
         logger.error(f"Missing required environment variables: {missing_vars}")
+        sys.exit(1)
+    
+    # Validate GEO_LOCATION
+    geo_location = required_vars['GEO_LOCATION']
+    if geo_location not in GEO_LOCATIONS:
+        logger.error(f"Invalid GEO_LOCATION '{geo_location}'. Must be one of: {list(GEO_LOCATIONS.keys())}")
         sys.exit(1)
     
     # Validate optional numeric values
@@ -50,9 +57,10 @@ def validate_env_vars() -> Dict[str, str]:
         'CF_API_TOKEN': required_vars['CF_API_TOKEN'],
         'CF_ACCOUNT_ID': required_vars['CF_ACCOUNT_ID'],
         'CF_ZONE_ID': required_vars['CF_ZONE_ID'],
+        'GEO_LOCATION': geo_location,
         'CF_LB_HOSTNAME': os.getenv("CF_LB_HOSTNAME", "app.example.com"),
         'CF_ORIGIN_WEIGHT': origin_weight,
-        'LABEL_SELECTOR': os.getenv("LABEL_SELECTOR", "watch=true"),
+        'LABEL_SELECTOR': os.getenv("LABEL_SELECTOR", "dns.external/geo-route=true"),
     }
 
 # Global configuration
@@ -94,24 +102,6 @@ def get_lb_ip(ingress: client.V1Ingress) -> Optional[str]:
         return lb_entry.ip or lb_entry.hostname
     except (AttributeError, IndexError) as e:
         logger.warning(f"Failed to extract load balancer IP: {e}")
-        return None
-
-def extract_geo_location_from_labels(ingress: client.V1Ingress) -> Optional[str]:
-    """Extract geo-location from ingress labels."""
-    try:
-        if not ingress.metadata or not ingress.metadata.labels:
-            return None
-        
-        labels = ingress.metadata.labels
-        
-        # Check for geo-location in labels
-        geo_location = labels.get('geo-location') or labels.get('geo_location')
-        if geo_location and geo_location in GEO_LOCATIONS:
-            return geo_location
-        
-        return None
-    except Exception as e:
-        logger.warning(f"Failed to extract geo-location from labels: {e}")
         return None
 
 def extract_cluster_name_from_labels(ingress: client.V1Ingress) -> Optional[str]:
@@ -184,14 +174,14 @@ def get_pool_origins(pool_id: str) -> List[Dict]:
     
     return []
 
-def create_or_update_pool_with_coordination(ip_address: str, geo_location: str, cluster_name: str) -> Optional[str]:
+def create_or_update_pool_with_coordination(ip_address: str, cluster_name: str) -> Optional[str]:
     """Create or update pool with multi-cluster coordination."""
     try:
         pool_name = build_pool_name(cluster_name)
         pool_id = find_pool_id_by_name(pool_name)
         
         # Get coordinates for the geo-location
-        location_data = GEO_LOCATIONS[geo_location]
+        location_data = GEO_LOCATIONS[CONFIG['GEO_LOCATION']]
         latitude = location_data["latitude"]
         longitude = location_data["longitude"]
         
@@ -208,7 +198,7 @@ def create_or_update_pool_with_coordination(ip_address: str, geo_location: str, 
             
             # Add new origin with geo-location identifier
             new_origin = {
-                "name": f"origin-{geo_location}",
+                "name": f"origin-{CONFIG['GEO_LOCATION']}",
                 "address": ip_address,
                 "enabled": True,
                 "weight": CONFIG['CF_ORIGIN_WEIGHT']
@@ -217,7 +207,7 @@ def create_or_update_pool_with_coordination(ip_address: str, geo_location: str, 
             # Merge with existing origins
             updated_origins = existing_origins + [new_origin]
             
-            logger.info(f"Merging IP {ip_address} from {geo_location} with {len(existing_origins)} existing origins")
+            logger.info(f"Merging IP {ip_address} from {CONFIG['GEO_LOCATION']} with {len(existing_origins)} existing origins")
             
             # Update pool
             update_data = {
@@ -238,7 +228,7 @@ def create_or_update_pool_with_coordination(ip_address: str, geo_location: str, 
         else:
             # Create new pool
             origins = [{
-                "name": f"origin-{geo_location}",
+                "name": f"origin-{CONFIG['GEO_LOCATION']}",
                 "address": ip_address,
                 "enabled": True,
                 "weight": CONFIG['CF_ORIGIN_WEIGHT']
@@ -342,6 +332,7 @@ def watch_ingresses():
     v1_api = setup_kubernetes_client()
     
     logger.info(f"Starting to watch ingresses with label selector: {CONFIG['LABEL_SELECTOR']}")
+    logger.info(f"Geo-location: {CONFIG['GEO_LOCATION']} ({GEO_LOCATIONS[CONFIG['GEO_LOCATION']]['name']})")
     logger.info(f"Load balancer hostname: {CONFIG['CF_LB_HOSTNAME']}")
     logger.info(f"Supported geo-locations: {list(GEO_LOCATIONS.keys())}")
     
@@ -363,13 +354,8 @@ def watch_ingresses():
                     logger.info(f"Event: {event_type} Ingress: {namespace}/{ingress_name}")
 
                     if event_type in ['ADDED', 'MODIFIED']:
-                        # Extract geo-location and cluster name from labels
-                        geo_location = extract_geo_location_from_labels(ingress)
+                        # Extract cluster name from labels
                         cluster_name = extract_cluster_name_from_labels(ingress)
-                        
-                        if not geo_location:
-                            logger.warning(f"No valid geo-location found in labels for {namespace}/{ingress_name}")
-                            continue
                         
                         if not cluster_name:
                             logger.warning(f"No cluster-name found in labels for {namespace}/{ingress_name}")
@@ -378,9 +364,9 @@ def watch_ingresses():
                         lb_ip = get_lb_ip(ingress)
                         if lb_ip:
                             logger.info(f"Load Balancer IP detected: {lb_ip}")
-                            logger.info(f"Processing for geo-location: {geo_location}, cluster: {cluster_name}")
+                            logger.info(f"Processing for geo-location: {CONFIG['GEO_LOCATION']}, cluster: {cluster_name}")
                             
-                            pool_id = create_or_update_pool_with_coordination(lb_ip, geo_location, cluster_name)
+                            pool_id = create_or_update_pool_with_coordination(lb_ip, cluster_name)
                             if pool_id:
                                 success = create_or_update_load_balancer(pool_id)
                                 if not success:

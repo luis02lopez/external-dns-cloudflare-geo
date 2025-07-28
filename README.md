@@ -18,7 +18,7 @@ ExternalDNS-like support for Cloudflare geo-routed load balancing policies. This
 
 This application is designed to work across multiple Kubernetes clusters to provide geo-distributed load balancing:
 
-- **Multi-cluster deployment**: Each cluster runs its own instance with geo-location and cluster-name extracted from ingress labels
+- **Multi-cluster deployment**: Each cluster runs its own instance with a unique `GEO_LOCATION` environment variable
 - **Intelligent merging**: When updating pools, the application preserves origins from other clusters
 - **Cloudflare Load Balancing**: Uses Cloudflare's Load Balancing service with proxy benefits
 - **Automatic recovery**: Watch streams automatically reconnect to prevent service disruption
@@ -26,21 +26,22 @@ This application is designed to work across multiple Kubernetes clusters to prov
 ### Multi-Cluster Flow
 
 1. Each cluster's external-dns-cloudflare-geo instance watches local ingresses
-2. When an ingress gets a load balancer IP, the instance extracts geo-location and cluster-name from ingress labels
+2. When an ingress gets a load balancer IP, the instance uses the `GEO_LOCATION` environment variable
 3. The application merges its origin with existing ones from other clusters
 4. Result: A single Cloudflare load balancer with multiple origins from different geo-locations
 
 ## Configuration
 
-The application uses environment variables for configuration and extracts geo-location and cluster information from ingress labels.
+The application uses environment variables for configuration and extracts cluster information from ingress labels.
 
 ### Required Environment Variables
 - `CF_API_TOKEN`: Cloudflare API token with Load Balancing: Monitors and Pools Write permissions
 - `CF_ACCOUNT_ID`: Your Cloudflare account ID
 - `CF_ZONE_ID`: Your Cloudflare zone ID where the load balancer will be created
+- `GEO_LOCATION`: Geo-location identifier for this cluster - **Important for multi-cluster coordination**
 
 ### Optional Environment Variables
-- `LABEL_SELECTOR`: Label selector to watch for Ingresses (default: `watch=true`)
+- `LABEL_SELECTOR`: Label selector to watch for Ingresses (default: `dns.external/geo-route=true`)
 - `CF_LB_HOSTNAME`: Hostname for the load balancer (default: `app.example.com`) - **This is the actual DNS hostname that will be created**
 - `CF_ORIGIN_WEIGHT`: Weight for the origin server in load balancing (default: `33`, range: 1-100)
 
@@ -50,7 +51,6 @@ The application extracts the following information from ingress labels:
 
 | Label | Required | Description | Example |
 |-------|----------|-------------|---------|
-| `geo-location` or `geo_location` | Yes | Geo-location identifier | `eu`, `us`, `asia` |
 | `cluster-name` or `cluster_name` | Yes | Cluster identifier | `prod-cluster-1`, `staging-eu` |
 
 ### Supported Geo-Locations
@@ -154,7 +154,8 @@ data:
   CF_ZONE_ID: "your-cloudflare-zone-id"
   CF_LB_HOSTNAME: "app.example.com"
   CF_ORIGIN_WEIGHT: "33"
-  LABEL_SELECTOR: "watch=true"
+  LABEL_SELECTOR: "dns.external/geo-route=true"
+  GEO_LOCATION: "eu"
 ```
 
 ### 7. Deployment
@@ -213,8 +214,7 @@ metadata:
   name: example-ingress
   namespace: default
   labels:
-    watch: "true"  # This label will be watched by the application
-    geo-location: "eu"  # Required: Geo-location identifier
+    dns.external/geo-route: "true"  # This label will be watched by the application
     cluster-name: "prod-cluster-1"  # Required: Cluster identifier
 spec:
   ingressClassName: nginx
@@ -234,44 +234,36 @@ spec:
 ## Usage
 
 ### Single Cluster Setup
-For a single cluster deployment, simply deploy the application and ensure your ingresses have the required labels:
+For a single cluster deployment, simply deploy the application with a geo-location:
 
 ```yaml
-metadata:
-  labels:
-    watch: "true"
-    geo-location: "us"
-    cluster-name: "my-cluster"
+env:
+- name: GEO_LOCATION
+  value: "us"
 ```
 
 ### Multiple Clusters
-For multi-cluster setups, deploy the application in each cluster and use different geo-locations and cluster names:
+For multi-cluster setups, deploy the application in each cluster with different `GEO_LOCATION` values:
 
 **Cluster 1 (Europe):**
 ```yaml
-metadata:
-  labels:
-    watch: "true"
-    geo-location: "eu"
-    cluster-name: "prod-eu-cluster"
+env:
+- name: GEO_LOCATION
+  value: "eu"
 ```
 
 **Cluster 2 (United States):**
 ```yaml
-metadata:
-  labels:
-    watch: "true"
-    geo-location: "us"
-    cluster-name: "prod-us-cluster"
+env:
+- name: GEO_LOCATION
+  value: "us"
 ```
 
 **Cluster 3 (Asia):**
 ```yaml
-metadata:
-  labels:
-    watch: "true"
-    geo-location: "asia"
-    cluster-name: "prod-asia-cluster"
+env:
+- name: GEO_LOCATION
+  value: "asia"
 ```
 
 **Important**: All instances can start in any order and will intelligently merge their origins. When an instance updates the Cloudflare pool, it:
@@ -301,7 +293,6 @@ Key log messages to monitor:
 - `Starting/Restarting watch stream` - Stream reconnection events
 - `Load Balancer IP detected` - Ingress processing
 - `Processing for geo-location: X, cluster: Y` - Label extraction success
-- `No valid geo-location found in labels` - Missing geo-location label
 - `No cluster-name found in labels` - Missing cluster-name label
 
 ### Health Check
@@ -322,15 +313,15 @@ Consider adding Prometheus metrics for:
 
 1. **Missing environment variables**
    ```
-   ERROR - Missing required environment variables: ['CF_API_TOKEN']
+   ERROR - Missing required environment variables: ['CF_API_TOKEN', 'GEO_LOCATION']
    ```
    Solution: Ensure all required environment variables are set
 
-2. **Missing geo-location label**
+2. **Invalid geo-location**
    ```
-   WARNING - No valid geo-location found in labels for default/api-ingress
+   ERROR - Invalid GEO_LOCATION 'invalid'. Must be one of: ['eu', 'us', 'asia']
    ```
-   Solution: Add `geo-location: "eu"` (or `us`, `asia`) to your ingress labels
+   Solution: Use one of the supported geo-locations: `eu`, `us`, or `asia`
 
 3. **Missing cluster-name label**
    ```
@@ -338,48 +329,42 @@ Consider adding Prometheus metrics for:
    ```
    Solution: Add `cluster-name: "your-cluster-name"` to your ingress labels
 
-4. **Invalid geo-location value**
-   ```
-   WARNING - No valid geo-location found in labels for default/api-ingress
-   ```
-   Solution: Use one of the supported geo-locations: `eu`, `us`, or `asia`
-
-5. **Cloudflare authentication failed**
+4. **Cloudflare authentication failed**
    ```
    ERROR - Cloudflare API request failed: 401 Unauthorized
    ```
    Solution: Check API token permissions and ensure it has Load Balancing: Monitors and Pools Write permissions
 
-6. **Zone not found**
+5. **Zone not found**
    ```
    ERROR - Cloudflare API request failed: 404 Not Found
    ```
    Solution: Verify zone exists and API token has access to it
 
-7. **No load balancer IP**
+6. **No load balancer IP**
    ```
    DEBUG - No Load Balancer IP available for default/api-ingress
    ```
    Solution: Wait for ingress controller to assign IP or check ingress configuration
 
-8. **Watch stream timeouts**
+7. **Watch stream timeouts**
    ```
    WARNING - Watch stream ended: TimeoutError
    INFO - Reconnecting in 5 seconds...
    ```
    Solution: This is normal behavior. The application automatically reconnects every 5 minutes or when the stream fails
 
-9. **Origin conflicts**
+8. **Origin conflicts**
    ```
    INFO - Merging IP from geo-location with 2 existing origins
    ```
    Solution: This is expected behavior when multiple clusters update the same pool. Each cluster manages its own origin.
 
-10. **Invalid weight value**
-    ```
-    ERROR - Invalid CF_ORIGIN_WEIGHT value: must be between 1 and 100
-    ```
-    Solution: Ensure CF_ORIGIN_WEIGHT is between 1 and 100
+9. **Invalid weight value**
+   ```
+   ERROR - Invalid CF_ORIGIN_WEIGHT value: must be between 1 and 100
+   ```
+   Solution: Ensure CF_ORIGIN_WEIGHT is between 1 and 100
 
 ## Implementation Details
 
@@ -387,9 +372,8 @@ Consider adding Prometheus metrics for:
 
 The application extracts information from ingress labels:
 
-1. **Geo-location**: Looks for `geo-location` or `geo_location` labels
-2. **Cluster name**: Looks for `cluster-name` or `cluster_name` labels
-3. **Validation**: Validates geo-location against supported values (`eu`, `us`, `asia`)
+1. **Cluster name**: Looks for `cluster-name` or `cluster_name` labels
+2. **Validation**: Validates that cluster-name is present
 
 ### Multi-Cluster Coordination
 

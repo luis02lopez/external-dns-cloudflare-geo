@@ -55,12 +55,13 @@ The application extracts the following information from ingress labels:
 
 ### Supported Geo-Locations
 
-The application supports three predefined geo-locations with automatic coordinate assignment:
+The application supports four predefined geo-locations with automatic coordinate assignment:
 
 | Location | Code | Latitude | Longitude | Description |
 |----------|------|----------|-----------|-------------|
 | **Europe** | `eu` | 50.1109 | 8.6821 | Frankfurt, Germany |
-| **United States** | `us` | 37.7749 | -122.4194 | San Francisco, CA |
+| **United States East** | `us_east` | 40.7128 | -74.0060 | New York, NY |
+| **United States West** | `us_west` | 34.0522 | -118.2437 | Los Angeles, CA |
 | **Asia** | `asia` | 35.6762 | 139.6503 | Tokyo, Japan |
 
 ### Pool Naming Convention
@@ -72,7 +73,8 @@ k8s-pool-{cluster-name}-{geo-location}
 
 For example:
 - `k8s-pool-smart-router-internal-eu`
-- `k8s-pool-smart-router-internal-us`
+- `k8s-pool-smart-router-internal-us_east`
+- `k8s-pool-smart-router-internal-us_west`
 - `k8s-pool-smart-router-internal-asia`
 
 ### Load Balancer Configuration
@@ -155,7 +157,7 @@ data:
   CF_LB_HOSTNAME: "app.example.com"
   CF_ORIGIN_WEIGHT: "33"
   LABEL_SELECTOR: "dns.external/geo-route=true"
-  GEO_LOCATION: "eu"
+  GEO_LOCATION: "us_east"
 ```
 
 ### 7. Deployment
@@ -239,7 +241,7 @@ For a single cluster deployment, simply deploy the application with a geo-locati
 ```yaml
 env:
 - name: GEO_LOCATION
-  value: "us"
+  value: "us_east"
 ```
 
 ### Multiple Clusters
@@ -252,14 +254,21 @@ env:
   value: "eu"
 ```
 
-**Cluster 2 (United States):**
+**Cluster 2 (United States East):**
 ```yaml
 env:
 - name: GEO_LOCATION
-  value: "us"
+  value: "us_east"
 ```
 
-**Cluster 3 (Asia):**
+**Cluster 3 (United States West):**
+```yaml
+env:
+- name: GEO_LOCATION
+  value: "us_west"
+```
+
+**Cluster 4 (Asia):**
 ```yaml
 env:
 - name: GEO_LOCATION
@@ -319,9 +328,9 @@ Consider adding Prometheus metrics for:
 
 2. **Invalid geo-location**
    ```
-   ERROR - Invalid GEO_LOCATION 'invalid'. Must be one of: ['eu', 'us', 'asia']
+   ERROR - Invalid GEO_LOCATION 'invalid'. Must be one of: ['eu', 'us_east', 'us_west', 'asia']
    ```
-   Solution: Use one of the supported geo-locations: `eu`, `us`, or `asia`
+   Solution: Use one of the supported geo-locations: `eu`, `us_east`, `us_west`, or `asia`
 
 3. **Missing cluster-name label**
    ```
@@ -390,7 +399,8 @@ The application uses a sophisticated coordination mechanism:
 The application includes predefined coordinates for each supported geo-location:
 
 - **Europe (eu)**: Frankfurt, Germany (50.1109, 8.6821)
-- **United States (us)**: San Francisco, CA (37.7749, -122.4194)
+- **United States East (us_east)**: New York, NY (40.7128, -74.0060)
+- **United States West (us_west)**: Los Angeles, CA (34.0522, -118.2437)
 - **Asia (asia)**: Tokyo, Japan (35.6762, 139.6503)
 
 These coordinates are automatically used for each geo-location.

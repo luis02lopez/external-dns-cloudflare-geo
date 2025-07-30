@@ -22,7 +22,8 @@ CF_API_BASE = "https://api.cloudflare.com/client/v4"
 # Predefined geo-location coordinates
 GEO_LOCATIONS = {
     "eu": {"name": "Europe", "latitude": 50.1109, "longitude": 8.6821},
-    "us": {"name": "United States", "latitude": 37.7749, "longitude": -122.4194},
+    "us_east": {"name": "United States East", "latitude": 40.7128, "longitude": -74.0060},
+    "us_west": {"name": "United States West", "latitude": 34.0522, "longitude": -118.2437},
     "asia": {"name": "Asia", "latitude": 35.6762, "longitude": 139.6503}
 }
 

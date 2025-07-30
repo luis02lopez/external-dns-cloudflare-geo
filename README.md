@@ -79,9 +79,15 @@ For example:
 
 ### Load Balancer Configuration
 The application creates Cloudflare load balancers with the following configuration:
-- **Steering Policy**: `least_connections` - Routes traffic to the origin with the fewest active connections
+- **Steering Policy**: `proximity` - Routes traffic to the geographically closest pool based on latitude/longitude coordinates
 - **Proxied**: `true` - Traffic is proxied through Cloudflare (orange cloud)
 - **TTL**: `30` seconds for DNS resolution
+
+#### Proximity Steering Benefits
+- **Geographic Optimization**: Automatically routes users to the closest data center based on pool coordinates
+- **Reduced Latency**: Minimizes round-trip time by selecting geographically nearest pools
+- **Automatic Failover**: Falls back to next closest pool if the nearest one is unhealthy
+- **No Configuration Required**: Works automatically with the predefined geo-location coordinates
 
 ## Kubernetes Deployment
 
@@ -275,14 +281,21 @@ env:
   value: "asia"
 ```
 
-**Important**: All instances can start in any order and will intelligently merge their origins. When an instance updates the Cloudflare pool, it:
+**Important**: All instances can start in any order and will intelligently merge their origins and pools. When an instance updates Cloudflare resources, it:
 
+**For Pools:**
 1. Retrieves the current pool (if it exists)
 2. Preserves all existing origins from other clusters
 3. Updates only its own origin with the new IP
 4. Saves the merged pool back to Cloudflare
 
-This ensures that Cloudflare pools remain consistent across all clusters, even if clusters are restarted or updated independently.
+**For Load Balancers:**
+1. Retrieves the current pool configuration (if load balancer exists)
+2. Merges its own pool with existing pools from other clusters
+3. Updates the load balancer with proximity steering policy
+4. Saves the merged configuration back to Cloudflare
+
+This ensures that all clusters contribute their pools to a single load balancer with proximity-based geographic routing. Each cluster manages its own pool while contributing to the shared load balancer.
 
 ## Monitoring
 
@@ -391,19 +404,37 @@ The application uses a sophisticated coordination mechanism:
 1. **Origin Naming**: Each origin is named with the geo-location (`origin-{geo-location}`)
 2. **Pool Naming**: Each pool is named with the cluster and geo-location (`k8s-pool-{cluster-name}-{geo-location}`)
 3. **Duplicate Detection**: Before adding a new origin, it checks if the IP already exists
-4. **Merging Logic**: When updating a pool, it preserves all existing origins and adds the new one
-5. **Conflict Resolution**: If multiple clusters have the same IP, only one origin is created
+4. **Pool Merging Logic**: When updating a pool, it preserves all existing origins and adds the new one
+5. **Load Balancer Management**: When updating a load balancer, it merges pools from all clusters and applies proximity steering policy for optimal geographic routing
+6. **Conflict Resolution**: If multiple clusters have the same IP, only one origin is created
 
 ### Predefined Coordinates
 
 The application includes predefined coordinates for each supported geo-location:
 
-- **Europe (eu)**: Frankfurt, Germany (50.1109, 8.6821)
-- **United States East (us_east)**: New York, NY (40.7128, -74.0060)
-- **United States West (us_west)**: Los Angeles, CA (34.0522, -118.2437)
-- **Asia (asia)**: Tokyo, Japan (35.6762, 139.6503)
+| Location | Coordinates | City | Purpose |
+|----------|-------------|------|---------|
+| **Europe (eu)** | 50.1109, 8.6821 | Frankfurt, Germany | European traffic routing |
+| **United States East (us_east)** | 40.7128, -74.0060 | New York, NY | Eastern US traffic routing |
+| **United States West (us_west)** | 34.0522, -118.2437 | Los Angeles, CA | Western US traffic routing |
+| **Asia (asia)** | 35.6762, 139.6503 | Tokyo, Japan | Asian traffic routing |
 
-These coordinates are automatically used for each geo-location.
+These coordinates are automatically assigned to pools and used by the `proximity` steering policy to route users to their nearest geographic location. When a user makes a request:
+
+1. **Cloudflare determines user location** (via Cloudflare PoP for proxied requests)
+2. **Calculates distances** to each pool using latitude/longitude coordinates
+3. **Routes to closest healthy pool** with automatic failover to next closest if needed
+
+### Load Balancer Management
+
+This application has full control over the load balancer configuration and sets:
+
+- **Steering Policy**: `proximity` - Routes users to geographically closest pools
+- **Default Pools**: Manages the list of geo-specific pools from all clusters
+- **Fallback Pool**: Automatically configured from available pools
+- **Proxied Traffic**: Enabled for Cloudflare's security and performance benefits
+
+The application creates a single load balancer that routes traffic optimally across all geographic regions based on user proximity to the pool coordinates.
 
 ### API Error Handling
 

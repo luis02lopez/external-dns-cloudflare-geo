@@ -312,44 +312,86 @@ def find_lb_id_by_name(name: str) -> Optional[str]:
     
     return None
 
+def get_lb_details_by_id(lb_id: str) -> Optional[Dict]:
+    """Get full load balancer details by ID."""
+    logger.info(f"Retrieving load balancer details for ID: {lb_id}")
+    url = f"{CF_API_BASE}/zones/{CONFIG['CF_ZONE_ID']}/load_balancers/{lb_id}"
+    result = make_cloudflare_request("GET", url)
+    
+    if result and result.get('success'):
+        lb_details = result.get('result')
+        existing_pools = lb_details.get('default_pools', [])
+        logger.info(f"Found {len(existing_pools)} existing pools: {existing_pools}")
+        return lb_details
+    else:
+        logger.error(f"Failed to retrieve load balancer details for ID: {lb_id}")
+        return None
+
 def create_or_update_load_balancer(pool_id: str) -> bool:
-    """Create or update load balancer."""
+    """Create or update load balancer with proximity steering."""
     try:
         logger.info(f"Processing load balancer operation for hostname: {CONFIG['CF_LB_HOSTNAME']}, pool ID: {pool_id}")
         
         lb_id = find_lb_id_by_name(CONFIG['CF_LB_HOSTNAME'])
         
+        # Start with default pools configuration
+        default_pools = [pool_id]
+        fallback_pool = pool_id
+        
+        if lb_id:
+            # Get existing pools to merge with current pool
+            logger.info(f"Load balancer {CONFIG['CF_LB_HOSTNAME']} exists (ID: {lb_id}), merging pools...")
+            existing_lb = get_lb_details_by_id(lb_id)
+            
+            if existing_lb:
+                existing_pools = existing_lb.get('default_pools', [])
+                existing_fallback = existing_lb.get('fallback_pool')
+                
+                # Merge pools: add current pool if not already present
+                merged_pools = list(existing_pools)
+                if pool_id not in merged_pools:
+                    merged_pools.append(pool_id)
+                    logger.info(f"Adding pool {pool_id} to existing pools. Total pools: {len(merged_pools)}")
+                else:
+                    logger.info(f"Pool {pool_id} already exists in load balancer")
+                
+                default_pools = merged_pools
+                fallback_pool = existing_fallback or pool_id
+                
+                logger.info(f"Merged pools: {default_pools}, Fallback: {fallback_pool}")
+            else:
+                logger.warning(f"Could not retrieve existing load balancer details, using only current pool")
+        
+        # Load balancer configuration managed by this script
         lb_data = {
             "name": CONFIG['CF_LB_HOSTNAME'],
-            "fallback_pool": pool_id,
-            "default_pools": [pool_id],
+            "fallback_pool": fallback_pool,
+            "default_pools": default_pools,
             "proxied": True,
             "ttl": 30,
-            "steering_policy": "least_connections"
+            "steering_policy": "proximity"
         }
         
         logger.info(f"Load balancer configuration: {lb_data}")
         
         if lb_id:
-            logger.info(f"Load balancer {CONFIG['CF_LB_HOSTNAME']} exists (ID: {lb_id}), updating...")
-            # Update existing load balancer
+            logger.info(f"Updating load balancer {CONFIG['CF_LB_HOSTNAME']} (ID: {lb_id})...")
             url = f"{CF_API_BASE}/zones/{CONFIG['CF_ZONE_ID']}/load_balancers/{lb_id}"
             result = make_cloudflare_request("PUT", url, lb_data)
             
             if result and result.get('success'):
-                logger.info(f"Successfully updated load balancer {CONFIG['CF_LB_HOSTNAME']}")
+                logger.info(f"Successfully updated load balancer {CONFIG['CF_LB_HOSTNAME']} with {len(default_pools)} pools")
                 return True
             else:
                 logger.error(f"Failed to update load balancer {CONFIG['CF_LB_HOSTNAME']}")
                 return False
         else:
-            logger.info(f"Load balancer {CONFIG['CF_LB_HOSTNAME']} does not exist, creating new load balancer...")
-            # Create new load balancer
+            logger.info(f"Creating new load balancer {CONFIG['CF_LB_HOSTNAME']}...")
             url = f"{CF_API_BASE}/zones/{CONFIG['CF_ZONE_ID']}/load_balancers"
             result = make_cloudflare_request("POST", url, lb_data)
             
             if result and result.get('success'):
-                logger.info(f"Successfully created load balancer {CONFIG['CF_LB_HOSTNAME']}")
+                logger.info(f"Successfully created load balancer {CONFIG['CF_LB_HOSTNAME']} with {len(default_pools)} pools")
                 return True
             else:
                 logger.error(f"Failed to create load balancer {CONFIG['CF_LB_HOSTNAME']}")

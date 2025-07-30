@@ -111,8 +111,8 @@ def extract_cluster_name_from_labels(ingress: client.V1Ingress) -> Optional[str]
         return None
 
 def build_pool_name(cluster_name: str) -> str:
-    """Build pool name from cluster name."""
-    return f"k8s-pool-{cluster_name}"
+    """Build pool name from cluster name with geo location suffix."""
+    return f"k8s-pool-{cluster_name}-{CONFIG['GEO_LOCATION']}"
 
 def make_cloudflare_request(method: str, url: str, data: Dict = None) -> Optional[Dict]:
     """Make a Cloudflare API request with proper error handling."""

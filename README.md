@@ -65,15 +65,15 @@ The application supports three predefined geo-locations with automatic coordinat
 
 ### Pool Naming Convention
 
-Pools are automatically named using the cluster name:
+Pools are automatically named using the cluster name with geo location suffix:
 ```
-k8s-pool-{cluster-name}
+k8s-pool-{cluster-name}-{geo-location}
 ```
 
 For example:
-- `k8s-pool-prod-cluster-1`
-- `k8s-pool-staging-eu`
-- `k8s-pool-dev-us`
+- `k8s-pool-smart-router-internal-eu`
+- `k8s-pool-smart-router-internal-us`
+- `k8s-pool-smart-router-internal-asia`
 
 ### Load Balancer Configuration
 The application creates Cloudflare load balancers with the following configuration:
@@ -380,7 +380,7 @@ The application extracts information from ingress labels:
 The application uses a sophisticated coordination mechanism:
 
 1. **Origin Naming**: Each origin is named with the geo-location (`origin-{geo-location}`)
-2. **Pool Naming**: Each pool is named with the cluster (`k8s-pool-{cluster-name}`)
+2. **Pool Naming**: Each pool is named with the cluster and geo-location (`k8s-pool-{cluster-name}-{geo-location}`)
 3. **Duplicate Detection**: Before adding a new origin, it checks if the IP already exists
 4. **Merging Logic**: When updating a pool, it preserves all existing origins and adds the new one
 5. **Conflict Resolution**: If multiple clusters have the same IP, only one origin is created
